@@ -18,7 +18,14 @@ FILEPATH = "market_data-1.csv"
 
 def load_data_pandas(file_path=FILEPATH, **kwargs):
 
-    df = pd.read_csv(file_path, index_col="timestamp", **kwargs)
+    df = pd.read_csv(
+        file_path,
+        parse_dates=["timestamp"],
+        date_format="%Y-%m-%d %H:%M:%S",
+        dtype={"symbol": "string", "price": "float64"},
+        index_col="timestamp",
+        **kwargs,
+    )
     return df
 
 
@@ -37,7 +44,7 @@ def load_data_polars(file_path=FILEPATH, **kwargs):
 if __name__ == "__main__":
 
     t1 = time.perf_counter()
-    df_pd = load_data_pandas(engine="pyarrow")
+    df_pd = load_data_pandas()
     t2 = time.perf_counter()
     df_pl = load_data_polars()
     t3 = time.perf_counter()
