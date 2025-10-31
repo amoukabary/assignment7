@@ -26,7 +26,7 @@ def load_data_pandas(file_path=FILEPATH, **kwargs):
         index_col="timestamp",
         **kwargs,
     )
-    return df
+    return df.sort_index()
 
 
 def load_data_polars(file_path=FILEPATH, **kwargs):
@@ -38,7 +38,7 @@ def load_data_polars(file_path=FILEPATH, **kwargs):
         try_parse_dates=True,
         **kwargs,
     )
-    return df
+    return df.sort("timestamp")
 
 
 if __name__ == "__main__":
