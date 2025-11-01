@@ -9,7 +9,6 @@ data_loader.py
 
 import pandas as pd
 import polars as pl
-from datetime import datetime
 import time
 
 # timestamp column given as YYYY-MM-DD HH:MM:SS format

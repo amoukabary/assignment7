@@ -1,1 +1,1 @@
-"""reporting.py - Generate reports comparing pandas and polars data ingestion."""
+"""reporting.py - Generate performance reports comparing different implmentations"""
