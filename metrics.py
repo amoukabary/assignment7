@@ -4,10 +4,6 @@ import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-import time
-import pandas as pd
-import polars as pl
-import matplotlib.pyplot as plt
 
 
 def compute_pandas_metrics(df_pandas: pd.DataFrame) -> tuple[pd.DataFrame, float]:
