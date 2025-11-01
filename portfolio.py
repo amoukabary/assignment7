@@ -19,32 +19,41 @@ class Position(PortfolioComponent):
     """Leaf node representing a single financial position."""
 
     def __init__(self, symbol: str, quantity: float, price: float):
-        self._symbol = symbol
-        self._quantity = quantity
-        self._price = price  # this will be maintained as VWAP
+        self.symbol = symbol
+        self.quantity = quantity
+        self.price = price  # this will be maintained as VWAP
 
     def get_value(self, market_price: dict[str, float]) -> float:
-        return self._quantity * market_price.get(self._symbol, 0.0)
+        return self.quantity * market_price.get(self.symbol, 0.0)
 
     def get_positions(self) -> list:
         return [self]
 
     def update(self, quantity: float, price: float):
-        self._quantity = quantity
-        self._price = price
+        self.quantity = quantity
+        self.price = price
 
     def __repr__(self):
-        return f"Position(symbol={self._symbol!r}, qty={self._quantity}, price={self._price})"
+        return (
+            f"Position(symbol={self.symbol!r}, qty={self.quantity}, price={self.price})"
+        )
+
+    def _to_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "quantity": self.quantity,
+            "price": self.price,
+        }
 
 
 class Portfolio(PortfolioComponent):
     """Composite node representing a portfolio of positions and/or sub-portfolios."""
 
-    def __init__(self, name: str = "", components: list[PortfolioComponent] = []):
-        self._name = name
-        self._owner: str = ""
-        self._components = components
-        self._position_cache: dict[str, Position] = {}
+    def __init__(self, name: str = "", owner: str = ""):
+        self.name = name
+        self.positions = {}
+        self.sub_portfolios = []
+        self.owner = owner
 
     def _vwap(
         self, old_qty: float, old_vwap: float, trade_qty: float, trade_price: float
@@ -62,41 +71,117 @@ class Portfolio(PortfolioComponent):
 
         return new_qty, new_vwap
 
-    def add_position(self, symbol: str, quantity: float, price: float):
-
-        pos = self._position_cache.get(symbol, None)
-        if pos is None:
-            pos = Position(symbol, 0.0, 0.0)
-            self._position_cache[symbol] = pos
-            self._components.append(pos)
-
-        # update VWAP
-        # NOTE: this part is redundant for new positions but keeps logic simple
-        # may consider removing
-        new_qty, new_vwap = self._vwap(pos._quantity, pos._price, quantity, price)
-        if new_qty == 0:
-            del self._position_cache[symbol]
-            self._components.remove(pos)
-        else:
-            pos.update(new_qty, new_vwap)
+    def add(self, component: PortfolioComponent):
+        if isinstance(component, Portfolio):
+            self.sub_portfolios.append(component)
+        elif isinstance(component, Position):
+            symbol = component.symbol
+            pos = self.positions.get(symbol)
+            if pos:
+                # update VWAP
+                pos = self.positions[symbol]
+                new_qty, new_vwap = self._vwap(
+                    pos.quantity, pos.price, component.quantity, component.price
+                )
+                if new_qty == 0:
+                    del self.positions[symbol]
+                else:
+                    pos.update(new_qty, new_vwap)
+            else:
+                if component.quantity != 0:
+                    self.positions[symbol] = component
 
     def remove(self, component: PortfolioComponent):
-        self._components.remove(component)
-
-    def get_value(self, market_price: dict[str, float]) -> float:
-        return sum(component.get_value(market_price) for component in self._components)
+        if isinstance(component, Portfolio):
+            self.sub_portfolios.remove(component)
+        elif isinstance(component, Position):
+            symbol = component.symbol
+            if symbol in self.positions:
+                del self.positions[symbol]
 
     def get_positions(self) -> list:
-        positions = []
-        for component in self._components:
-            positions.extend(component.get_positions())
+        positions = list(self.positions.values())
+        for subportfolio in self.sub_portfolios:
+            positions.extend(subportfolio.get_positions())
         return positions
 
+    def get_value(self, market_price: dict[str, float]) -> float:
+        total = sum(pos.get_value(market_price) for pos in self.positions.values())
+        total += sum(sp.get_value(market_price) for sp in self.sub_portfolios)
+        return total
+
     def __repr__(self):
-        return f"Portfolio(name={self._name!r}, owner={self._owner!r}, components={self._components})"
+        if self.owner:
+            return f"Portfolio(name={self.name!r}, owner={self.owner!r}, positions={len(self.positions)}, sub_portfolios={len(self.sub_portfolios)})"
+        return f"Portfolio(name={self.name!r}, positions={len(self.positions)}, sub_portfolios={len(self.sub_portfolios)})"
+
+    def _to_dict(self) -> dict:
+        res: dict[str, object] = {"name": self.name}
+
+        if self.owner:
+            res["owner"] = self.owner
+
+        if self.positions:
+            res["positions"] = [pos._to_dict() for pos in self.positions.values()]
+        if self.sub_portfolios:
+            res["sub_portfolios"] = [sp._to_dict() for sp in self.sub_portfolios]
+
+        return res
+
+
+class PortfolioBuilder:
+    """Builder class to construct Portfolio objects"""
+
+    def __init__(self, name: str = ""):
+        self._portfolio = Portfolio(name)
+
+    def set_owner(self, owner: str):
+        self._portfolio.owner = owner
+
+    def add_position(self, symbol: str, quantity: float, price: float):
+        position = Position(symbol, quantity, price)
+        self._portfolio.add(position)
+        return self
+
+    def add_subportfolio(self, builder: "PortfolioBuilder"):
+        sub = builder.build()
+        self._portfolio.add(sub)
+        return self
+
+    def build(self):
+        built = self._portfolio
+        self._portfolio = Portfolio()
+        return built
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Portfolio:
+        def build_recursive(data: dict) -> PortfolioBuilder:
+            builder = cls(data.get("name", ""))
+            if "owner" in data:
+                builder.set_owner(data["owner"])
+            for pos_data in data.get("positions", []):
+                builder.add_position(
+                    symbol=pos_data["symbol"],
+                    quantity=pos_data["quantity"],
+                    price=pos_data["price"],
+                )
+            for sp_data in data.get("sub_portfolios", []):
+                subbuilder = build_recursive(sp_data)
+                builder.add_subportfolio(subbuilder)
+            return builder
+
+        builder = build_recursive(data)
+        return builder.build()
+
+    @classmethod
+    def from_json(cls, filepath: str) -> Portfolio:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        return cls.from_dict(data)
 
 
 if __name__ == "__main__":
 
-    portfolio = Portfolio("My Portfolio")
-    print(portfolio)
+    portfolio = PortfolioBuilder.from_json("portfolio_structure-1.json")
+
+    print(json.dumps(portfolio._to_dict(), indent=2))
