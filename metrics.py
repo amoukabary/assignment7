@@ -14,7 +14,7 @@ def compute_pandas_metrics(df_pandas: pd.DataFrame) -> tuple[pd.DataFrame, float
     """Compute 20-period rolling mean, std, and Sharpe ratio in Pandas."""
     start = time.time()
 
-    df_pandas = df_pandas.sort_values(["symbol", "timestamp"])
+    # df_pandas = df_pandas.sort_values(["symbol", "timestamp"])
 
     df_pandas["ma20"] = df_pandas.groupby("symbol")["price"].transform(
         lambda x: x.rolling(20, min_periods=1).mean()
@@ -36,8 +36,7 @@ def compute_polars_metrics(df_polars: pl.DataFrame) -> tuple[pl.DataFrame, float
     start = time.time()
 
     df_polars = (
-        df_polars.sort(["symbol", "timestamp"])
-        .group_by("symbol", maintain_order=True)
+        df_polars.group_by("symbol", maintain_order=True)
         .agg(
             [
                 pl.col("timestamp"),
