@@ -3,185 +3,104 @@ import json
 from collections import defaultdict
 from abc import ABC, abstractmethod
 from threading import Lock
+import polars as pl
+import pandas as pd
+from data_loader import load_data_pandas
+import numpy as np
+from enum import Enum
 
 
-class PortfolioComponent(ABC):
-    @abstractmethod
-    def get_value(self, market_price) -> float:
-        pass
-
-    @abstractmethod
-    def get_positions(self) -> list:
-        pass
-
-
-class Position(PortfolioComponent):
-    """Leaf node representing a single financial position."""
-
-    def __init__(self, symbol: str, quantity: float, price: float):
-        self.symbol = symbol
-        self.quantity = quantity
-        self.price = price  # this will be maintained as VWAP
-
-    def get_value(self, market_price: dict[str, float]) -> float:
-        return self.quantity * market_price.get(self.symbol, 0.0)
-
-    def get_positions(self) -> list:
-        return [self]
-
-    def update(self, quantity: float, price: float):
-        self.quantity = quantity
-        self.price = price
-
-    def __repr__(self):
-        return (
-            f"Position(symbol={self.symbol!r}, qty={self.quantity}, price={self.price})"
-        )
-
-    def _to_dict(self) -> dict:
-        return {
-            "symbol": self.symbol,
-            "quantity": self.quantity,
-            "price": self.price,
-        }
+class Annualization(Enum):
+    D = 252
+    B = 252
+    W = 52
+    M = 12
+    Q = 4
+    A = 1
+    H = 252 * 6.5
+    T = 252 * 6.5 * 60
+    S = 252 * 6.5 * 60 * 60
 
 
-class Portfolio(PortfolioComponent):
-    """Composite node representing a portfolio of positions and/or sub-portfolios."""
-
-    def __init__(self, name: str = "", owner: str = ""):
-        self.name = name
-        self.positions = {}
-        self.sub_portfolios = []
-        self.owner = owner
-
-    def _vwap(
-        self, old_qty: float, old_vwap: float, trade_qty: float, trade_price: float
-    ) -> tuple[float, float]:
-
-        new_qty = old_qty + trade_qty
-        if new_qty == 0:
-            return 0.0, 0.0
-
-        if old_qty * new_qty < 0:
-            # position flip
-            return trade_price, trade_price
-
-        new_vwap = (old_qty * old_vwap + trade_qty * trade_price) / new_qty
-
-        return new_qty, new_vwap
-
-    def add(self, component: PortfolioComponent):
-        if isinstance(component, Portfolio):
-            self.sub_portfolios.append(component)
-        elif isinstance(component, Position):
-            symbol = component.symbol
-            pos = self.positions.get(symbol)
-            if pos:
-                # update VWAP
-                pos = self.positions[symbol]
-                new_qty, new_vwap = self._vwap(
-                    pos.quantity, pos.price, component.quantity, component.price
-                )
-                if new_qty == 0:
-                    del self.positions[symbol]
-                else:
-                    pos.update(new_qty, new_vwap)
-            else:
-                if component.quantity != 0:
-                    self.positions[symbol] = component
-
-    def remove(self, component: PortfolioComponent):
-        if isinstance(component, Portfolio):
-            self.sub_portfolios.remove(component)
-        elif isinstance(component, Position):
-            symbol = component.symbol
-            if symbol in self.positions:
-                del self.positions[symbol]
-
-    def get_positions(self) -> list:
-        positions = list(self.positions.values())
-        for subportfolio in self.sub_portfolios:
-            positions.extend(subportfolio.get_positions())
-        return positions
-
-    def get_value(self, market_price: dict[str, float]) -> float:
-        total = sum(pos.get_value(market_price) for pos in self.positions.values())
-        total += sum(sp.get_value(market_price) for sp in self.sub_portfolios)
-        return total
-
-    def __repr__(self):
-        if self.owner:
-            return f"Portfolio(name={self.name!r}, owner={self.owner!r}, positions={len(self.positions)}, sub_portfolios={len(self.sub_portfolios)})"
-        return f"Portfolio(name={self.name!r}, positions={len(self.positions)}, sub_portfolios={len(self.sub_portfolios)})"
-
-    def _to_dict(self) -> dict:
-        res: dict[str, object] = {"name": self.name}
-
-        if self.owner:
-            res["owner"] = self.owner
-
-        if self.positions:
-            res["positions"] = [pos._to_dict() for pos in self.positions.values()]
-        if self.sub_portfolios:
-            res["sub_portfolios"] = [sp._to_dict() for sp in self.sub_portfolios]
-
-        return res
+# -------------------------------------------- #
+# Compute metrics for positions and portfolios #
+# -------------------------------------------- #
 
 
-class PortfolioBuilder:
-    """Builder class to construct Portfolio objects"""
+def compute_position_metrics(
+    position: dict, df: pd.DataFrame, annualization: float = 1.0
+) -> dict:
+    symbol = position["symbol"]
+    quantity = position["quantity"]
+    symbol_prices = df[df["symbol"] == symbol]["price"]
+    freq = symbol_prices.index.freq or pd.infer_freq(symbol_prices.index)
+    last_price = symbol_prices.iloc[-1]
+    rets = symbol_prices.pct_change().dropna()
+    vol = rets.rolling(window=20).std().mean()
+    drawdown = (symbol_prices - symbol_prices.cummax()) / symbol_prices.cummax()
+    max_dd = drawdown.min()
 
-    def __init__(self, name: str = ""):
-        self._portfolio = Portfolio(name)
+    metrics_dict = {
+        "symbol": symbol,
+        "value": float(last_price * quantity),
+        "volatility": float(vol) * np.sqrt(annualization),
+        "drawdown": float(max_dd),
+    }
 
-    def set_owner(self, owner: str):
-        self._portfolio.owner = owner
+    return metrics_dict
 
-    def add_position(self, symbol: str, quantity: float, price: float):
-        position = Position(symbol, quantity, price)
-        self._portfolio.add(position)
-        return self
 
-    def add_subportfolio(self, builder: "PortfolioBuilder"):
-        sub = builder.build()
-        self._portfolio.add(sub)
-        return self
+def compute_portfolio_metrics_serialized(
+    portfolio: dict, df: pd.DataFrame, annualization: float = 1.0
+) -> dict:
+    name = portfolio.get("name", "")
+    owner = portfolio.get("owner", "")
+    positions = portfolio.get("positions", [])
+    sub_portfolios = portfolio.get("sub_portfolios", [])
+    portfolio_metrics = {
+        "name": name,
+    }
+    if owner:
+        portfolio_metrics["owner"] = owner
 
-    def build(self):
-        built = self._portfolio
-        self._portfolio = Portfolio()
-        return built
+    total_value = 0.0
+    total_vol = 0.0
 
-    @classmethod
-    def from_dict(cls, data: dict) -> Portfolio:
-        def build_recursive(data: dict) -> PortfolioBuilder:
-            builder = cls(data.get("name", ""))
-            if "owner" in data:
-                builder.set_owner(data["owner"])
-            for pos_data in data.get("positions", []):
-                builder.add_position(
-                    symbol=pos_data["symbol"],
-                    quantity=pos_data["quantity"],
-                    price=pos_data["price"],
-                )
-            for sp_data in data.get("sub_portfolios", []):
-                subbuilder = build_recursive(sp_data)
-                builder.add_subportfolio(subbuilder)
-            return builder
+    position_metrics = []
+    for pos in positions:
+        pm = compute_position_metrics(pos, df, annualization)
+        val = pm["value"]
+        vol = pm["volatility"]
+        total_vol += vol * val
+        total_value += val
+        position_metrics.append(pm)
 
-        builder = build_recursive(data)
-        return builder.build()
+    sub_portfolio_metrics = []
+    for sp in sub_portfolios:
+        sp = compute_portfolio_metrics_serialized(sp, df, annualization)
+        val = sp["total_value"]
+        vol = sp["aggregate_volatility"]
+        total_vol += vol * val
+        total_value += val
+        sub_portfolio_metrics.append(sp)
 
-    @classmethod
-    def from_json(cls, filepath: str) -> Portfolio:
-        with open(filepath, "r") as f:
-            data = json.load(f)
-        return cls.from_dict(data)
+    portfolio_metrics["positions"] = position_metrics
+    portfolio_metrics["sub_portfolios"] = sub_portfolio_metrics
+
+    portfolio_metrics["total_value"] = total_value
+    agg_vol = total_vol / total_value if total_value else 0.0
+    portfolio_metrics["aggregate_volatility"] = agg_vol
+
+    return portfolio_metrics
 
 
 if __name__ == "__main__":
 
-    portfolio = PortfolioBuilder.from_json("portfolio_structure-1.json")
+    df = load_data_pandas()
+    index = df.index.unique()
+    freq = pd.infer_freq(index)
+    af = Annualization[freq.upper()].value
 
-    print(json.dumps(portfolio._to_dict(), indent=2))
+    portfolio = json.load(open("portfolio_structure.json"))
+    metrics = compute_portfolio_metrics_serialized(portfolio, df)
+    print(json.dumps(metrics, indent=2))

@@ -25,7 +25,7 @@ def load_data_pandas(file_path=FILEPATH, **kwargs):
         index_col="timestamp",
         **kwargs,
     )
-    return df.sort_index()
+    return df.sort_values(["timestamp"])
 
 
 def load_data_polars(file_path=FILEPATH, **kwargs):
@@ -37,20 +37,41 @@ def load_data_polars(file_path=FILEPATH, **kwargs):
         try_parse_dates=True,
         **kwargs,
     )
-    return df.sort("timestamp")
+    return df.sort(["timestamp"])
+
+
+def load_data_to_dict(file_path=FILEPATH, loader="pandas", **kwargs):
+    """Load data into a list of dictionaries using specified loader."""
+    if loader == "pandas":
+        df = load_data_pandas(file_path, **kwargs)
+        data_dict = {symbol: group["price"] for symbol, group in df.groupby("symbol")}
+    elif loader == "polars":
+        df = load_data_polars(file_path, **kwargs)
+        data_dict = {
+            symbol: df.filter(pl.col("symbol") == symbol)[["timestamp", "price"]]
+            for symbol in df["symbol"].unique()
+        }
+    else:
+        raise ValueError("Unsupported loader specified. Use 'pandas' or 'polars'.")
+    return data_dict
 
 
 if __name__ == "__main__":
 
-    t1 = time.perf_counter()
-    df_pd = load_data_pandas()
-    t2 = time.perf_counter()
-    df_pl = load_data_polars()
-    t3 = time.perf_counter()
-    print(f"Pandas load time: {t2 - t1:.4f} seconds")
-    print(f"Polars load time: {t3 - t2:.4f} seconds")
+    import json
 
-    print("\nPandas DataFrame:")
-    print(df_pd.head())
-    print("\nPolars DataFrame:")
-    print(df_pl.head())
+    # t1 = time.perf_counter()
+    # df_pd = load_data_pandas()
+    # t2 = time.perf_counter()
+    # df_pl = load_data_polars()
+    # t3 = time.perf_counter()
+    # print(f"Pandas load time: {t2 - t1:.4f} seconds")
+    # print(f"Polars load time: {t3 - t2:.4f} seconds")
+
+    # print("\nPandas DataFrame:")
+    # print(df_pd.head())
+    # print("\nPolars DataFrame:")
+    # print(df_pl.head())
+
+    df = load_data_to_dict(file_path="market_data-2.csv", loader="pandas")
+    print(df)
